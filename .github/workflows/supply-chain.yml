@@ -78,6 +78,7 @@ jobs:
           for dep in $DEPS; do
             echo "----------------------------------------"
             echo "Scanning package: $dep"
-            guarddog npm scan "$dep" --exclude-rules metadata_mismatch --exclude-rules potentially_compromised_email_domain --exclude-rules unclaimed_maintainer_email_domain || true
+            # guarddog npm scan "$dep" --exclude-rules metadata_mismatch --exclude-rules potentially_compromised_email_domain --exclude-rules unclaimed_maintainer_email_domain || true
+            guarddog npm scan "$dep" || true
           done
         continue-on-error: true
