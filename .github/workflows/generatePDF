@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""
+Usage:
+  pip install requests pdfkit
+  # install wkhtmltopdf (see README below for platform instructions)
+  GITHUB_TOKEN=ghp_xxx python3 generate_grype_report.py charlenelearn2learn-blip juiceshop-supply-chain-lab --output grype-report.pdf
+
+This script:
+ - Fetches all code-scanning alerts from the GitHub API for the given repo
+ - Filters for tool_name == "Grype"
+ - Builds an HTML report and converts it to PDF via pdfkit (wkhtmltopdf)
+"""
+import os
+import sys
+import argparse
+import requests
+import pdfkit
+from datetime import datetime
+from html import escape
+
+GITHUB_API = "https://api.github.com"
+
+def fetch_alerts(owner, repo, token):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}"
+    }
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/code-scanning/alerts"
+    params = {"per_page": 100}
+    alerts = []
+    while url:
+        resp = requests.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+        page = resp.json()
+        if isinstance(page, dict) and "message" in page:
+            raise RuntimeError(f"API error: {page}")
+        alerts.extend(page)
+        # pagination
+        if 'next' in resp.links:
+            url = resp.links['next']['url']
+            params = None
+        else:
+            url = None
+    return alerts
+
+def fetch_alert_detail(owner, repo, alert_number, token):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}"
+    }
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}"
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+def build_html_report(owner, repo, alerts, details_map):
+    ts = datetime.utcnow().isoformat() + "Z"
+    css = """
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h1 { color: #333; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #ddd; padding: 8px; vertical-align: top; }
+    th { background:#f6f6f6; text-align:left; }
+    .severity-CRITICAL { color: #7a0b0b; font-weight: bold; }
+    .severity-HIGH { color: #b02a2a; }
+    .severity-MEDIUM { color: #d9822b; }
+    .severity-LOW { color: #2b7b2b; }
+    .mono { font-family: monospace; font-size: 0.95em; background:#fbfbfb; padding:2px 4px; border-radius:3px; }
+    .small { font-size: 0.9em; color:#666; }
+    """
+    rows = []
+    for a in alerts:
+        number = a.get("number")
+        rule = a.get("rule", {}).get("id") or a.get("tool", {}).get("name") or ""
+        tool = a.get("tool", {}).get("name","")
+        severity = a.get("most_recent_instance", {}).get("severity") or a.get("rule", {}).get("severity") or a.get("severity") or ""
+        state = a.get("state","")
+        created = a.get("created_at","")
+        updated = a.get("updated_at","")
+        html_url = a.get("html_url") or ""
+        short_message = a.get("message", {}).get("text") or a.get("rule", {}).get("description", "")
+        # detail instance locations if available
+        detail = details_map.get(number, {})
+        instances = detail.get("instances") or a.get("instances") or []
+        locations_html=[]
+        for inst in instances:
+            loc = inst.get("location") or {}
+            path = loc.get("path") or loc.get("file") or ""
+            start_line = loc.get("start_line") or loc.get("start") or ""
+            commit = inst.get("commit_sha") or ""
+            locations_html.append(f"{escape(path)}:{escape(str(start_line))} <span class='mono'>{escape(commit[:8]) if commit else ''}</span>")
+        locations = "<br>".join(locations_html) if locations_html else ""
+        rows.append({
+            "number": number, "rule": escape(rule), "tool": escape(tool),
+            "severity": escape(severity), "state": escape(state),
+            "created": escape(created), "updated": escape(updated),
+            "message": escape(short_message), "locations": locations, "html_url": html_url
+        })
+    # build HTML
+    html_parts = [f"<html><head><meta charset='utf-8'><title>Grype Code-Scanning Report: {owner}/{repo}</title><style>{css}</style></head><body>"]
+    html_parts.append(f"<h1>Grype code-scanning report — {owner}/{repo}</h1>")
+    html_parts.append(f"<p class='small'>Generated: {escape(ts)} — total Grype alerts: {len(rows)}</p>")
+    html_parts.append("<table>")
+    html_parts.append("<thead><tr><th>#</th><th>Severity</th><th>Rule / Message</th><th>Locations</th><th>State</th><th>Created / Updated</th></tr></thead><tbody>")
+    for r in rows:
+        sev_class = f"severity-{r['severity'].upper()}" if r['severity'] else ""
+        html_parts.append("<tr>")
+        html_parts.append(f"<td><a href='{r['html_url']}' target='_blank'>{r['number']}</a></td>")
+        html_parts.append(f"<td class='{sev_class}'>{r['severity']}</td>")
+        html_parts.append(f"<td><strong>{r['rule']}</strong><div>{r['message']}</div></td>")
+        html_parts.append(f"<td>{r['locations']}</td>")
+        html_parts.append(f"<td>{r['state']}</td>")
+        html_parts.append(f"<td class='small'>{r['created']}<br/>{r['updated']}</td>")
+        html_parts.append("</tr>")
+    html_parts.append("</tbody></table>")
+    html_parts.append("</body></html>")
+    return "\n".join(html_parts)
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate PDF report of Grype code-scanning alerts.")
+    parser.add_argument("owner", help="repo owner")
+    parser.add_argument("repo", help="repo name")
+    parser.add_argument("--output", "-o", default="grype-code-scanning-report.pdf", help="PDF output filename")
+    parser.add_argument("--token", "-t", default=os.environ.get("GITHUB_TOKEN"), help="GitHub token (or set GITHUB_TOKEN)")
+    args = parser.parse_args()
+    if not args.token:
+        print("Set GITHUB_TOKEN env var or pass --token")
+        sys.exit(1)
+    print("Fetching alerts...")
+    alerts = fetch_alerts(args.owner, args.repo, args.token)
+    # filter Grype alerts
+    grype_alerts = [a for a in alerts if (a.get("tool",{}).get("name","").lower() == "grype")]
+    print(f"Total alerts fetched: {len(alerts)}, Grype alerts: {len(grype_alerts)}")
+    # fetch details per alert (optional but gives instances)
+    details_map = {}
+    for a in grype_alerts:
+        try:
+            number = a.get("number")
+            if number:
+                details_map[number] = fetch_alert_detail(args.owner, args.repo, number, args.token)
+        except Exception as e:
+            print(f"Warning: could not fetch detail for alert {a.get('number')}: {e}")
+    html = build_html_report(args.owner, args.repo, grype_alerts, details_map)
+    tmp_html = "grype-report-temp.html"
+    with open(tmp_html, "w", encoding="utf-8") as f:
+        f.write(html)
+    print("Converting HTML to PDF (requires wkhtmltopdf)...")
+    try:
+        pdfkit.from_file(tmp_html, args.output)
+        print(f"Wrote PDF: {args.output}")
+    except Exception as e:
+        print("PDF conversion failed:", e)
+        print(f"HTML report written to {tmp_html} — open in browser or convert manually with wkhtmltopdf.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
