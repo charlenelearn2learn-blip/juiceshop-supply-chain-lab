@@ -21,11 +21,17 @@ jobs:
         with:
           node-version: '22'
 
+      # Setup Python environment cleanly for GuardDog
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # 1. Install dependencies so node_modules exists
       - name: Install Dependencies
         run: npm install --legacy-peer-deps --ignore-scripts
 
-      # 2. Install Syft and Grype CLIs directly (bypasses GitHub Action wrapper bugs)
+      # 2. Install Syft and Grype CLIs directly
       - name: Install Syft and Grype CLIs
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
@@ -55,21 +61,20 @@ jobs:
           sarif_file: results.sarif
           category: "grype-sbom"
 
-      # 7. Install system dependencies and GuardDog via pip
+# Install GuardDog via pip
       - name: Install GuardDog & jq
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential python3-dev python3-pip jq
           pip3 install guarddog
+          sudo apt-get install -y jq
 
-      # 8. Parse package.json and run GuardDog scan on each package name
+     # Parse package.json and run GuardDog scan on each package name
       - name: Run GuardDog Dependency Scan
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Extracting dependencies from package.json..."
           DEPS=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json)
-
+          
           if [ -z "$DEPS" ]; then
             echo "No dependencies found to scan."
             exit 0
@@ -79,7 +84,10 @@ jobs:
           for dep in $DEPS; do
             echo "----------------------------------------"
             echo "Scanning package: $dep"
-            # guarddog npm scan "$dep" --exclude-rules metadata_mismatch --exclude-rules potentially_compromised_email_domain --exclude-rules unclaimed_maintainer_email_domain || true
-            guarddog npm scan "$dep" || true
+            # Use 'scan' for remote npm registry packages
+            guarddog npm scan "$dep" \
+              --exclude-rules metadata_mismatch \
+              --exclude-rules potentially_compromised_email_domain \
+              --exclude-rules unclaimed_maintainer_email_domain || true
           done
         continue-on-error: true
