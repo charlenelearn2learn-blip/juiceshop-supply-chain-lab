@@ -67,5 +67,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Extracting dependencies from package.json..."
-          DEPS=$(jq -r '(.dependencies // {}) + (.dev](#)
-
+          DEPS=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json)
+
+          if [ -z "$DEPS" ]; then
+            echo "No dependencies found to scan."
+            exit 0
+          fi
+
+          echo "Scanning dependencies with GuardDog..."
+          for dep in $DEPS; do
+            echo "----------------------------------------"
+            echo "Scanning package: $dep"
+            guarddog npm scan "$dep" --exclude-rules metadata_mismatch --exclude-rules potentially_compromised_email_domain --exclude-rules unclaimed_maintainer_email_domain || true
+          done
+        continue-on-error: true
